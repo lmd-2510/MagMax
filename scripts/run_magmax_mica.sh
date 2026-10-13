@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# One seed, CIFAR100/20, unchanged upstream FP32 training, MagMax lambda=0.5.
+set -Eeuo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+ACTION="${1:-status}"
+PYTHON_BIN="${MAGMAX_PYTHON:-python}"
+GPU_ID="${MAGMAX_GPU_ID:-0}"
+DATA_ROOT="${MAGMAX_DATA_ROOT:-$ROOT/datasets}"
+OUT="$ROOT/outs/magmax_CIFAR100_20_seed5"
+CKPTS="$ROOT/checkpoints/ViT-B-16/sequential_finetuning/class_incremental/CIFAR100-20/ft-epochs-10-seed:5"
+die() { echo "[STOP] $*" >&2; exit 1; }
+[[ "$GPU_ID" == 0 || "$GPU_ID" == 1 ]] || die "MAGMAX_GPU_ID must be 0 or 1."
+
+ARGS=(--model ViT-B-16 --dataset CIFAR100 --n_splits 20 --split_strategy class
+      --sequential-finetuning --epochs 10 --seed 5 --batch-size 128
+      --lr 1e-5 --wd 0.1 --ls 0.0 --warmup_length 500 --data-location "$DATA_ROOT")
+
+check_environment() {
+  env CUDA_VISIBLE_DEVICES="$GPU_ID" "$PYTHON_BIN" - <<'PY'
+import importlib.metadata as metadata
+import platform
+if platform.system() != "Linux" or platform.python_version() != "3.10.14":
+    raise SystemExit("Use Linux + Python 3.10.14 from the upstream environment.yml.")
+for name, expected in {"torch": "2.4.0", "torchvision": "0.19.0", "numpy": "1.26.4",
+                       "open-clip-torch": "2.26.1", "timm": "1.0.7",
+                       "pillow": "10.4.0"}.items():
+    installed = metadata.version(name)
+    if installed.split("+")[0] != expected:
+        raise SystemExit(f"{name}: expected {expected}, installed {installed}.")
+import torch
+import open_clip
+from src.datasets.registry import get_dataset
+if torch.version.cuda != "11.8" or not torch.cuda.is_available() or torch.cuda.device_count() != 1:
+    raise SystemExit("Expected PyTorch CUDA 11.8 with exactly one visible GPU.")
+free, total = torch.cuda.mem_get_info()
+print(f"[GPU] {torch.cuda.get_device_name(0)}; free={free/2**30:.2f}/{total/2**30:.2f} GiB")
+print("[OK] Environment matches the pinned core versions.")
+PY
+  echo "[CONFIG] CIFAR100 / 20 tasks / ViT-B-16 / 10 epochs / batch128 / seed5 / lambda0.5"
+  echo "[GPU] physical index=$GPU_ID"
+  df -h "$ROOT"
+}
+
+check_training_state() {
+  local count=0 idx
+  for idx in {0..19}; do
+    if [[ -f "$CKPTS/finetuned_${idx}.pt" ]]; then count=$((count + 1)); fi
+  done
+  if (( count > 0 && count < 20 )); then
+    die "Found $count/20 task checkpoints. Upstream cannot restore the exact RNG state. Preserve/rename the task checkpoint directory before a fresh run."
+  fi
+  echo "[CHECKPOINTS] $count/20 exist; complete sets are reused by upstream."
+}
+
+run_job() {
+  mkdir -p "$OUT"
+  trap 'code=$?; printf "%s\n" "$code" > "$OUT/exit_code.txt"' EXIT
+  check_environment
+  check_training_state
+  export CUDA_VISIBLE_DEVICES="$GPU_ID" PYTHONUNBUFFERED=1
+  git rev-parse HEAD > "$OUT/source_commit.txt"
+  printf '%s\n' "$GPU_ID" > "$OUT/gpu.txt"
+  printf '%q ' "$PYTHON_BIN" finetune_splitted.py "${ARGS[@]}" > "$OUT/training_command.txt"
+  printf '\n' >> "$OUT/training_command.txt"
+  local began=$SECONDS
+  "$PYTHON_BIN" -u finetune_splitted.py "${ARGS[@]}" 2>&1 | tee "$OUT/train.log"
+  "$PYTHON_BIN" -u merge_magmax_only.py "${ARGS[@]}" --save "$OUT" 2>&1 | tee "$OUT/merge.log"
+  printf '%s\n' "$((SECONDS - began))" > "$OUT/total_seconds.txt"
+  echo "[DONE] Result: $OUT/result.json"
+}
+
+case "$ACTION" in
+  check) check_environment; check_training_state ;;
+  start)
+    mkdir -p "$OUT"
+    # Resolve Python now so nohup uses the exact currently activated Conda environment.
+    PYTHON_BIN="$(command -v "$PYTHON_BIN")" || die "Activate the magmax Conda environment."
+    exec 9> "$OUT/launcher.lock"
+    flock -n 9 || die "A MagMax job is already active for this output directory."
+    check_environment
+    check_training_state
+    [[ ! -e "$OUT/exit_code.txt" ]] || die "A previous launch exists. Inspect status; use 'merge' for evaluation-only reruns."
+    nohup env MAGMAX_GPU_ID="$GPU_ID" MAGMAX_PYTHON="$PYTHON_BIN" MAGMAX_DATA_ROOT="$DATA_ROOT" \
+      bash "$ROOT/scripts/run_magmax_mica.sh" run > "$OUT/nohup.log" 2>&1 < /dev/null &
+    printf '%s\n' "$!" > "$OUT/job.pid"
+    echo "[STARTED] PID=$!; physical GPU=$GPU_ID"
+    echo "[LOG] $OUT/nohup.log"
+    ;;
+  run) run_job ;;
+  merge)
+    mkdir -p "$OUT"
+    exec 9> "$OUT/launcher.lock"
+    flock -n 9 || die "A MagMax job is already active for this output directory."
+    check_environment
+    env CUDA_VISIBLE_DEVICES="$GPU_ID" "$PYTHON_BIN" -u merge_magmax_only.py "${ARGS[@]}" --save "$OUT" 2>&1 | tee "$OUT/merge.log"
+    ;;
+  status)
+    if [[ -s "$OUT/exit_code.txt" ]]; then
+      echo "[FINISHED] exit_code=$(<"$OUT/exit_code.txt") (0 means success)"
+    elif [[ -s "$OUT/job.pid" ]] && kill -0 "$(<"$OUT/job.pid")" 2>/dev/null; then
+      echo "[RUNNING] PID=$(<"$OUT/job.pid")"
+    else
+      echo "[IDLE/STOPPED] No active job confirmed."
+    fi
+    [[ ! -s "$OUT/nohup.log" ]] || tail -n 25 "$OUT/nohup.log"
+    ;;
+  follow) [[ -f "$OUT/nohup.log" ]] || die "No log yet; run start first."; tail -f "$OUT/nohup.log" ;;
+  *) echo "Usage: bash scripts/run_magmax_mica.sh {check|start|status|follow|merge}"; exit 2 ;;
+esac
