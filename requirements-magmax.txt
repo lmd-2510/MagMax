@@ -1,0 +1,12 @@
+# Runtime dependencies for this CIFAR100 MagMax launcher, pinned from upstream environment.yml.
+# Keep the existing CUDA torch/torchvision in ai_env; constrain them during pip installation.
+numpy==1.26.4
+Pillow==10.4.0
+open-clip-torch==2.26.1
+timm==1.0.7
+tqdm==4.66.4
+ftfy==6.2.0
+huggingface-hub==0.24.2
+regex==2024.7.24
+safetensors==0.4.3
+packaging==24.1

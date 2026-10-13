@@ -6,6 +6,39 @@ Một GPU vật lý 0 hoặc 1, một lần chạy với seed=5.
 
 ## Setup trên server
 
+### Dùng ai_env hiện có (theo lựa chọn của bạn)
+
+Sau khi clone repo ở `~/DrugDrug/MagMax`, chạy:
+
+```bash
+cd ~/DrugDrug/MagMax
+git pull --ff-only
+conda activate ai_env
+mkdir -p outs
+python - <<'PY' > outs/torch_constraints.txt
+from importlib.metadata import version, PackageNotFoundError
+for name in ('torch', 'torchvision', 'torchaudio'):
+    try:
+        print(f'{name}=={version(name)}')
+    except PackageNotFoundError:
+        if name != 'torchaudio':
+            raise
+PY
+python -m pip install -r requirements-magmax.txt -c outs/torch_constraints.txt
+```
+
+Constraints giữ nguyên bản torch/torchvision/torchaudio đang có, tránh pip tự đổi bản CUDA.
+Các package khác trong requirements được cài/đổi về phiên bản ghi trong file.
+Launcher kiểm tra import và CUDA thực tế, chấp nhận runtime ai_env khác export gốc;
+hyperparameters training giữ nguyên. Phiên bản runtime được lưu cùng output
+(`environment.txt`, `runtime.txt`); nếu khác thì không coi là tái lập nguyên môi trường tác giả.
+Python 3.9-3.12 được chấp nhận cho bộ dependency đã ghim; bản gốc là 3.10.14.
+Launcher đặt `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1` để code load full-model checkpoint
+gốc hoạt động với PyTorch >=2.6, theo tài liệu:
+https://docs.pytorch.org/docs/2.6/notes/serialization.html#environment-variables
+
+### Tùy chọn môi trường nguyên bản
+
 Nếu chưa có repo:
 
 ```bash
@@ -25,7 +58,7 @@ File môi trường nguyên bản dành cho Linux; đây là môi trường riê
 
 ```bash
 cd ~/DrugDrug/MagMax
-conda activate magmax
+conda activate ai_env
 nvidia-smi
 export MAGMAX_GPU_ID=0
 bash scripts/run_magmax_mica.sh check

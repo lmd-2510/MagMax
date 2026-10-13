@@ -11,6 +11,9 @@ OUT="$ROOT/outs/magmax_CIFAR100_20_seed5"
 CKPTS="$ROOT/checkpoints/ViT-B-16/sequential_finetuning/class_incremental/CIFAR100-20/ft-epochs-10-seed:5"
 die() { echo "[STOP] $*" >&2; exit 1; }
 [[ "$GPU_ID" == 0 || "$GPU_ID" == 1 ]] || die "MAGMAX_GPU_ID must be 0 or 1."
+# Upstream saves full modules. Preserve its loading behavior under PyTorch >=2.6.
+[[ "${TORCH_FORCE_WEIGHTS_ONLY_LOAD:-0}" != 1 ]] || die "Unset TORCH_FORCE_WEIGHTS_ONLY_LOAD for upstream full-module checkpoints."
+export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 ARGS=(--model ViT-B-16 --dataset CIFAR100 --n_splits 20 --split_strategy class
       --sequential-finetuning --epochs 10 --seed 5 --batch-size 128
@@ -20,22 +23,33 @@ check_environment() {
   env CUDA_VISIBLE_DEVICES="$GPU_ID" "$PYTHON_BIN" - <<'PY'
 import importlib.metadata as metadata
 import platform
-if platform.system() != "Linux" or platform.python_version() != "3.10.14":
-    raise SystemExit("Use Linux + Python 3.10.14 from the upstream environment.yml.")
-for name, expected in {"torch": "2.4.0", "torchvision": "0.19.0", "numpy": "1.26.4",
+if platform.system() != "Linux":
+    raise SystemExit("Run on the Linux GPU server.")
+if not (3, 9) <= tuple(map(int, platform.python_version_tuple()[:2])) <= (3, 12):
+    raise SystemExit("Pinned dependencies require Python 3.9-3.12; upstream used 3.10.14.")
+for name, expected in {"numpy": "1.26.4",
                        "open-clip-torch": "2.26.1", "timm": "1.0.7",
-                       "pillow": "10.4.0"}.items():
+                       "pillow": "10.4.0", "tqdm": "4.66.4"}.items():
     installed = metadata.version(name)
     if installed.split("+")[0] != expected:
         raise SystemExit(f"{name}: expected {expected}, installed {installed}.")
 import torch
+import torchvision
 import open_clip
 from src.datasets.registry import get_dataset
-if torch.version.cuda != "11.8" or not torch.cuda.is_available() or torch.cuda.device_count() != 1:
-    raise SystemExit("Expected PyTorch CUDA 11.8 with exactly one visible GPU.")
+if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
+    raise SystemExit("Expected a CUDA PyTorch build with exactly one visible GPU.")
+probe = torch.randn(8, 8, device='cuda', requires_grad=True)
+(probe @ probe).sum().backward()
+torch.cuda.synchronize()
+del probe
+print(f"[ENV] Python={platform.python_version()} torch={torch.__version__} torchvision={torchvision.__version__} CUDA={torch.version.cuda}")
+if (platform.python_version(), torch.__version__.split('+')[0],
+    torchvision.__version__.split('+')[0], torch.version.cuda) != ('3.10.14', '2.4.0', '0.19.0', '11.8'):
+    print("[ENV] Reusing ai_env runtime; versions differ from the upstream environment export.")
 free, total = torch.cuda.mem_get_info()
 print(f"[GPU] {torch.cuda.get_device_name(0)}; free={free/2**30:.2f}/{total/2**30:.2f} GiB")
-print("[OK] Environment matches the pinned core versions.")
+print("[OK] CUDA/import checks and pinned MagMax dependencies passed.")
 PY
   echo "[CONFIG] CIFAR100 / 20 tasks / ViT-B-16 / 10 epochs / batch128 / seed5 / lambda0.5"
   echo "[GPU] physical index=$GPU_ID"
@@ -59,6 +73,8 @@ run_job() {
   check_environment
   check_training_state
   export CUDA_VISIBLE_DEVICES="$GPU_ID" PYTHONUNBUFFERED=1
+  "$PYTHON_BIN" -m pip freeze > "$OUT/environment.txt"
+  "$PYTHON_BIN" -c 'import sys, torch, torchvision; print(sys.version); print("torch", torch.__version__, "torchvision", torchvision.__version__, "CUDA", torch.version.cuda)' > "$OUT/runtime.txt"
   git rev-parse HEAD > "$OUT/source_commit.txt"
   printf '%s\n' "$GPU_ID" > "$OUT/gpu.txt"
   printf '%q ' "$PYTHON_BIN" finetune_splitted.py "${ARGS[@]}" > "$OUT/training_command.txt"
@@ -75,7 +91,7 @@ case "$ACTION" in
   start)
     mkdir -p "$OUT"
     # Resolve Python now so nohup uses the exact currently activated Conda environment.
-    PYTHON_BIN="$(command -v "$PYTHON_BIN")" || die "Activate the magmax Conda environment."
+    PYTHON_BIN="$(command -v "$PYTHON_BIN")" || die "Activate ai_env (or the magmax Conda environment)."
     exec 9> "$OUT/launcher.lock"
     flock -n 9 || die "A MagMax job is already active for this output directory."
     check_environment
