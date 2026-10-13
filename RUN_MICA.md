@@ -113,6 +113,34 @@ giữ/đổi tên thư mục task checkpoint trước khi chạy fresh; nếu đ
 và bạn cần chắc chúng đến từ cùng config. Khi lần launch trước đã có exit code,
 `start` yêu cầu kiểm tra trạng thái trước, tránh âm thầm ghi đè kết quả.
 
+## Chạy lại sau lỗi tải CIFAR100, chưa có checkpoint task
+
+Nếu lần trước lỗi integrity của dataset trước khi train và Tunable MagMax đang
+tải/giải nén dataset dùng chung, có thể đặt MagMax vào hàng chờ ngay:
+
+```bash
+cd ~/DrugDrug/MagMax
+conda activate ai_env
+git pull --ff-only
+export MAGMAX_GPU_ID=0
+export MAGMAX_DATA_ROOT="$PWD/datasets"
+bash scripts/run_magmax_mica.sh retry
+bash scripts/run_magmax_mica.sh follow
+```
+
+`retry` chỉ chấp nhận lần chạy đã thất bại và không có checkpoint task nào.
+Di chuyển file log/exit code/metadata cũ vào `outs/magmax_CIFAR100_20_seed5/failed_attempts/`
+để giữ lịch sử; không xóa dataset, pretrained cache, zeroshot hoặc task checkpoints.
+Job mới chạy nền, hiện `[STAGE] waiting_dataset`, không download thêm, không sửa
+training/config. Kiểm tra MD5 train/test/meta mỗi 30 giây; đủ dữ liệu thì tự train
+trên GPU0 và merge/evaluate. Nếu bước dataset của Tunable báo lỗi, job chờ dừng
+và yêu cầu xem log đó. Thời gian chờ không nằm trong `total_seconds.txt` training/merge.
+
+PID chờ lưu trong queue.pid; job.pid chỉ được tạo khi bắt đầu training, để
+Tunable không hiểu nhầm job chờ này là một job đang download và chờ ngược lại.
+Khóa launcher giữ xuyên suốt thời gian chờ và training. Dùng `status` như trước;
+sau `[STARTED]` có thể đóng SSH/máy cá nhân. Không chạy lại `retry` khi job còn chạy.
+
 Nguồn recipe: `scripts/CIL/all.sh`, `src/args.py`, `finetune_splitted.py`,
 `src/utils.py`, `merge_splitted.py`, `src/merging/task_vectors.py` và `src/eval.py`
 tại upstream commit `4f49f18fb30216d3a0dbe4220b469a3273e45475`.
