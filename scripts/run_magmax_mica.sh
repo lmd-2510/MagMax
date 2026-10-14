@@ -192,5 +192,6 @@ case "$ACTION" in
     [[ ! -s "$OUT/nohup.log" ]] || tail -n 25 "$OUT/nohup.log"
     ;;
   follow) [[ -f "$OUT/nohup.log" ]] || die "No log yet; run start first."; tail -f "$OUT/nohup.log" ;;
-  *) echo "Usage: bash scripts/run_magmax_mica.sh {check|start|retry|status|follow|merge}"; exit 2 ;;
+  summary) "$PYTHON_BIN" scripts/summarize_mica.py --run-dir "$OUT" ;;
+  *) echo "Usage: bash scripts/run_magmax_mica.sh {check|start|retry|status|follow|merge|summary}"; exit 2 ;;
 esac

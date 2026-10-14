@@ -83,6 +83,20 @@ cat outs/magmax_CIFAR100_20_seed5/result.json
 Ctrl+C trong `follow` chỉ dừng xem log. Chỉ coi job hoàn tất khi `status` báo
 `exit_code=0` và có kết quả `result.json` từ lần chạy đó.
 
+Sau khi hoàn tất, xuất bảng tổng hợp giống cách lưu kết quả Tunable:
+
+```bash
+bash scripts/run_magmax_mica.sh summary
+```
+
+Tạo `summary.csv` và `summary.json` trong `outs/magmax_CIFAR100_20_seed5/`.
+Chỉ đọc result.json/metadata, không train, merge, evaluate hay dùng GPU.
+CSV có một dòng accuracy cuối trên toàn bộ 10.000 ảnh test, classifier 100 lớp.
+JSON giữ kết quả gốc và commit/runtime/lệnh/thời gian đã lưu của lần chạy.
+Không đổi commit của lần training thành commit mới được pull khi xuất summary.
+Đây là một seed nên không báo std; protocol khác baseline MagMax được đánh giá
+trên các target nhỏ trong thực nghiệm Tunable, không so trực tiếp hai accuracy đó.
+
 ## Recipe
 
 - CIFAR-100: 50.000 train / 10.000 test, class order gốc, 20 task × 5 lớp.
